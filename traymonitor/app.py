@@ -1,7 +1,6 @@
 """Связка: значок в трее, всплывающее окно, диспетчер задач, фоновый сборщик."""
 from __future__ import annotations
 
-import os
 import sys
 import time
 
@@ -13,13 +12,14 @@ from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 from . import theme as T
 from . import trayicon
 from .collector import Worker
+from .osdep import WINDOWS, instance_id
 from .panel import tray_panel
 from .popup import Popup, H as POPUP_H, W as POPUP_W
 from .settings import ICON_STYLES, INTERVALS, Settings
 from .taskmanager import TaskManager
 from .widgets import History
 
-SOCKET_NAME = f"traymonitor-{os.getuid()}"
+SOCKET_NAME = f"traymonitor-{instance_id()}"
 MARGIN = 8
 
 
@@ -147,7 +147,30 @@ class Controller(QObject):
         else:
             self.show_popup()
 
+    def _popup_pos_windows(self):
+        """Windows: Qt знает точное место значка; панель задач — по рабочей области."""
+        icon = self.tray.geometry()
+        if icon.isEmpty():
+            return None
+        screen = QGuiApplication.screenAt(icon.center()) or QGuiApplication.primaryScreen()
+        geo, av = screen.geometry(), screen.availableGeometry()
+        gap = MARGIN
+        if av.top() > geo.top():                       # панель задач сверху
+            x, y = icon.center().x() - POPUP_W // 2, av.top() + gap
+        elif av.left() > geo.left():                   # слева
+            x, y = av.left() + gap, icon.center().y() - POPUP_H // 2
+        elif av.right() < geo.right():                 # справа
+            x, y = av.right() + 1 - gap - POPUP_W, icon.center().y() - POPUP_H // 2
+        else:                                          # снизу (по умолчанию) или автоскрытие
+            x = icon.center().x() - POPUP_W // 2
+            y = min(av.bottom(), icon.top() - 1) + 1 - gap - POPUP_H
+        x = max(av.left() + MARGIN, min(x, av.right() + 1 - POPUP_W - MARGIN))
+        y = max(av.top() + MARGIN, min(y, av.bottom() + 1 - POPUP_H - MARGIN))
+        return x, y
+
     def _popup_pos(self):
+        if WINDOWS:
+            return self._popup_pos_windows() or self._popup_pos_fallback()
         pi = tray_panel()
         if pi is not None:
             r, g = pi.rect, pi.screen
@@ -208,6 +231,8 @@ class Controller(QObject):
             self.manager.refresh_requested.connect(self._request_refresh)
             if self.last is not None:
                 self.manager.update_data(self.last, self.hist)
+        if self.manager.isMinimized():
+            self.manager.showNormal()
         self.manager.show()
         self.manager.raise_()
         self.manager.activateWindow()
@@ -267,6 +292,13 @@ def _send_to_running(cmd: str) -> bool:
     sock.connectToServer(SOCKET_NAME)
     if not sock.waitForConnected(300):
         return False
+    if WINDOWS:
+        # без этого Windows не даст работающему экземпляру вывести окно на передний план
+        try:
+            import ctypes
+            ctypes.windll.user32.AllowSetForegroundWindow(-1)  # ASFW_ANY
+        except Exception:
+            pass
     sock.write(cmd.encode() + b"\n")
     sock.flush()
     sock.waitForBytesWritten(300)
@@ -276,10 +308,20 @@ def _send_to_running(cmd: str) -> bool:
 
 def main(argv: list[str]) -> int:
     cmd = "manager" if "--manager" in argv else "popup" if "--popup" in argv else ""
+    if WINDOWS:
+        # своя группа на панели задач вместо «python.exe»
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Trayscope.TrayMonitor")
+        except Exception:
+            pass
     app = QApplication(argv)
     app.setApplicationName("Tray Monitor")
     app.setQuitOnLastWindowClosed(False)
-    app.setWindowIcon(QIcon.fromTheme("utilities-system-monitor"))
+    icon = QIcon.fromTheme("utilities-system-monitor")
+    if icon.isNull():   # в Windows нет иконочной темы — рисуем свою
+        icon = trayicon.render("bars", 35, 55, [])
+    app.setWindowIcon(icon)
 
     if _send_to_running(cmd or "popup"):
         return 0

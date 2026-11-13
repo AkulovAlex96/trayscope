@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import sys
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import (QColor, QFont, QFontDatabase, QIcon, QPainter,
@@ -51,7 +52,8 @@ def heat_color(value: float, vmax: float) -> QColor | None:
     return c
 
 
-_MONO_FAMILIES = ["JetBrains Mono", "IBM Plex Mono", "DejaVu Sans Mono"]
+_MONO_FAMILIES = ["JetBrains Mono", "IBM Plex Mono", "DejaVu Sans Mono",
+                  "Cascadia Mono", "Consolas"]
 
 
 def _mono_family() -> str:
@@ -160,16 +162,47 @@ _ICON_ALIASES = {
 }
 
 
+_icon_provider = None
+_exe_seen: set[str] = set()
+_letter_cache: dict[str, QIcon] = {}
+
+
+def _exe_icon(name: str) -> QIcon | None:
+    """Windows: иконка из исполняемого файла процесса (как в штатном диспетчере)."""
+    global _icon_provider
+    from .collector import EXE_BY_NAME
+    exe = EXE_BY_NAME.get(name)
+    if not exe:
+        return None
+    _exe_seen.add(name)
+    if _icon_provider is None:
+        from PyQt6.QtWidgets import QFileIconProvider
+        _icon_provider = QFileIconProvider()
+    from PyQt6.QtCore import QFileInfo
+    ic = _icon_provider.icon(QFileInfo(exe))
+    return None if ic.isNull() else ic
+
+
 def proc_icon(name: str) -> QIcon:
     ic = _proc_icon_cache.get(name)
     if ic is not None:
         return ic
-    candidates = [name, name.lower(), _ICON_ALIASES.get(name, "")]
     ic = None
-    for c in candidates:
-        if c and QIcon.hasThemeIcon(c):
-            ic = QIcon.fromTheme(c)
-            break
+    if sys.platform == "win32":
+        ic = _exe_icon(name)
+        if ic is None and name not in _exe_seen:
+            # путь к .exe пока не известен (нет доступа или сборщик не успел):
+            # отдаём букву, но в основной кэш не кладём — вдруг путь появится
+            ic = _letter_cache.get(name)
+            if ic is None:
+                ic = _letter_cache[name] = letter_icon(name)
+            return ic
+    else:
+        candidates = [name, name.lower(), _ICON_ALIASES.get(name, "")]
+        for c in candidates:
+            if c and QIcon.hasThemeIcon(c):
+                ic = QIcon.fromTheme(c)
+                break
     if ic is None:
         ic = letter_icon(name)
     _proc_icon_cache[name] = ic

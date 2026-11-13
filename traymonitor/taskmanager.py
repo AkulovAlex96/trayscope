@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QButtonGroup, QFrame, QGridLayou
                              QPushButton, QStackedWidget, QTabBar, QTreeWidget,
                              QTreeWidgetItem, QVBoxLayout, QWidget)
 
+from . import osdep as OS
 from . import procactions as PA
 from . import theme as T
 from .collector import ProcInfo, group_procs
@@ -20,6 +21,7 @@ KEY = Qt.ItemDataRole.UserRole          # сортировочный ключ к
 META = Qt.ItemDataRole.UserRole + 1     # (key, pids, name, main_pid, is_group)
 
 ME = getpass.getuser()
+SYS_USERS, SYS_LABEL = OS.SYSTEM_USERS, OS.SYSTEM_LABEL
 
 
 class Item(QTreeWidgetItem):
@@ -112,7 +114,7 @@ class TaskManager(QMainWindow):
         bar.setSpacing(6)
         self.chips = {}
         grp = QButtonGroup(self)
-        for key, text in (("all", "Все"), ("me", "Мои"), ("root", "Root")):
+        for key, text in (("all", "Все"), ("me", "Мои"), ("root", SYS_LABEL)):
             b = QPushButton(text)
             b.setObjectName("chip")
             b.setCheckable(True)
@@ -216,7 +218,7 @@ class TaskManager(QMainWindow):
         if self.user_filter == "me":
             procs = [p for p in procs if p.user == ME]
         elif self.user_filter == "root":
-            procs = [p for p in procs if p.user == "root"]
+            procs = [p for p in procs if p.user in SYS_USERS]
         q = self.search.text().strip().lower()
         if q:
             procs = [p for p in procs if q in p.name.lower() or str(p.pid).startswith(q)
@@ -265,9 +267,9 @@ class TaskManager(QMainWindow):
         procs = self._filtered(s.procs)
         counts = {"all": len(s.procs),
                   "me": sum(1 for p in s.procs if p.user == ME),
-                  "root": sum(1 for p in s.procs if p.user == "root")}
+                  "root": sum(1 for p in s.procs if p.user in SYS_USERS)}
         for k, b in self.chips.items():
-            b.setText({"all": "Все", "me": "Мои", "root": "Root"}[k] + f"  {counts[k]}")
+            b.setText({"all": "Все", "me": "Мои", "root": SYS_LABEL}[k] + f"  {counts[k]}")
 
         tree = self.tree
         cur = tree.currentItem()

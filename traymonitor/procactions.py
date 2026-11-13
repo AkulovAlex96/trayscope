@@ -10,6 +10,38 @@ from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices, QGuiApplication
 from PyQt6.QtWidgets import QMenu, QMessageBox, QWidget
 
+from .osdep import WINDOWS
+
+if WINDOWS:
+    # Классы приоритета Windows (значения psutil), как в штатном диспетчере задач
+    PRIORITIES = [
+        ("Реального времени", psutil.REALTIME_PRIORITY_CLASS),
+        ("Высокий", psutil.HIGH_PRIORITY_CLASS),
+        ("Выше среднего", psutil.ABOVE_NORMAL_PRIORITY_CLASS),
+        ("Обычный", psutil.NORMAL_PRIORITY_CLASS),
+        ("Ниже среднего", psutil.BELOW_NORMAL_PRIORITY_CLASS),
+        ("Низкий", psutil.IDLE_PRIORITY_CLASS),
+    ]
+    PRIORITY_MENU = "Приоритет"
+    KILL_LABEL = "Снять задачу принудительно"
+    SUSPEND_LABEL = "Приостановить"
+else:
+    PRIORITIES = [
+        ("Высокий (−10, нужен root)", -10), ("Выше обычного (−5, нужен root)", -5),
+        ("Обычный (0)", 0), ("Ниже обычного (5)", 5),
+        ("Низкий (10)", 10), ("Очень низкий (19)", 19),
+    ]
+    PRIORITY_MENU = "Приоритет (nice)"
+    KILL_LABEL = "Убить принудительно (SIGKILL)"
+    SUSPEND_LABEL = "Приостановить (SIGSTOP)"
+
+
+def priority_name(value) -> str:
+    for label, v in PRIORITIES:
+        if v == value:
+            return label
+    return str(value)
+
 
 def _apply(pids, fn) -> list[str]:
     errors = []
@@ -59,6 +91,13 @@ def open_location(pid: int) -> str | None:
         return f"Не удалось получить путь: {e}"
     if not exe:
         return "У процесса нет исполняемого файла"
+    if WINDOWS:
+        # Проводник с выделенным файлом
+        try:
+            subprocess.Popen(["explorer", f"/select,{os.path.normpath(exe)}"])
+        except OSError:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(exe)))
+        return None
     # Dolphin умеет выделять файл через D-Bus FileManager1
     try:
         subprocess.Popen(
@@ -93,7 +132,7 @@ def details_text(pid: int) -> str:
                 ("Статус", p.status()),
                 ("Запущен", datetime.datetime.fromtimestamp(p.create_time()).strftime("%d.%m.%Y %H:%M:%S")),
                 ("Потоков", str(p.num_threads())),
-                ("Nice", str(p.nice())),
+                ("Приоритет" if WINDOWS else "Nice", priority_name(p.nice())),
                 ("RSS", f"{p.memory_info().rss / 1024 ** 2:.1f} МиБ"),
                 ("VMS", f"{p.memory_info().vms / 1024 ** 2:.1f} МиБ"),
             ]
@@ -129,7 +168,7 @@ def build_menu(parent: QWidget, pid: int, name: str, group_pids: list[int],
     a = m.addAction("Завершить" + (f" ({len(targets)})" if len(targets) > 1 else ""))
     a.setShortcut("Del")
     a.triggered.connect(lambda: run(terminate, targets, "Завершение"))
-    a = m.addAction("Убить принудительно (SIGKILL)")
+    a = m.addAction(KILL_LABEL)
     a.setShortcut("Shift+Del")
     a.triggered.connect(lambda: confirm_kill(parent, name, targets, notify))
     if not is_group and len(group_pids) > 1:
@@ -140,16 +179,14 @@ def build_menu(parent: QWidget, pid: int, name: str, group_pids: list[int],
         a = m.addAction("Возобновить")
         a.triggered.connect(lambda: run(resume, targets, "Возобновление"))
     else:
-        a = m.addAction("Приостановить (SIGSTOP)")
+        a = m.addAction(SUSPEND_LABEL)
         a.triggered.connect(lambda: run(suspend, targets, "Приостановка"))
-    pm = m.addMenu("Приоритет (nice)")
+    pm = m.addMenu(PRIORITY_MENU)
     try:
         cur = psutil.Process(pid).nice()
     except psutil.Error:
         cur = None
-    for label, val in (("Высокий (−10, нужен root)", -10), ("Выше обычного (−5, нужен root)", -5),
-                       ("Обычный (0)", 0), ("Ниже обычного (5)", 5),
-                       ("Низкий (10)", 10), ("Очень низкий (19)", 19)):
+    for label, val in PRIORITIES:
         a = pm.addAction(label)
         a.setCheckable(True)
         a.setChecked(cur == val)
@@ -173,7 +210,7 @@ def confirm_kill(parent, name: str, pids: list[int], notify) -> None:
     if r == QMessageBox.StandardButton.Yes:
         errs = kill(pids)
         if errs:
-            notify(f"SIGKILL: {name}", "\n".join(errs[:6]))
+            notify(f"Принудительное завершение: {name}", "\n".join(errs[:6]))
 
 
 def show_details(parent, pid: int, name: str) -> None:

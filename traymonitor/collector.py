@@ -8,7 +8,16 @@ from dataclasses import dataclass, field
 import psutil
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
 
+from .osdep import WINDOWS, short_user, win_proc_table
+
 NCPU = psutil.cpu_count() or 1
+
+# Путь к исполняемому файлу по имени процесса (для иконок в Windows).
+# Заполняется сборщиком, читается из GUI-потока.
+EXE_BY_NAME: dict[str, str] = {}
+
+# Псевдопроцессы Windows, которые не стоит показывать в списке
+_WIN_HIDDEN_PIDS = {0}          # System Idle Process — его «нагрузка» = простой ЦП
 
 
 @dataclass
@@ -50,7 +59,17 @@ class Snapshot:
     errors: list[str] = field(default_factory=list)
 
 
+_WIN_VIRTUAL_NIC = ("loopback", "vethernet", "virtualbox", "vmware", "hyper-v",
+                    "isatap", "teredo", "bluetooth", "wsl", "docker", "npcap", "tap-")
+
+
 def _physical_disks() -> set[str]:
+    if WINDOWS:
+        # ключи psutil в Windows: PhysicalDrive0, PhysicalDrive1, …
+        try:
+            return set((psutil.disk_io_counters(perdisk=True) or {}).keys())
+        except Exception:
+            return set()
     try:
         return {d for d in os.listdir("/sys/block") if os.path.exists(f"/sys/block/{d}/device")}
     except OSError:
@@ -58,6 +77,19 @@ def _physical_disks() -> set[str]:
 
 
 def _physical_nics() -> set[str]:
+    if WINDOWS:
+        try:
+            stats = psutil.net_if_stats()
+            addrs = psutil.net_if_addrs()
+        except Exception:
+            return set()
+
+        def has_mac(n):
+            # у VPN-туннелей (wintun, tun) и loopback нет MAC — иначе трафик считался бы дважды
+            return any(a.family == psutil.AF_LINK and a.address for a in addrs.get(n, ()))
+
+        return {n for n, st in stats.items()
+                if st.isup and has_mac(n) and not any(v in n.lower() for v in _WIN_VIRTUAL_NIC)}
     try:
         return {n for n in os.listdir("/sys/class/net") if os.path.exists(f"/sys/class/net/{n}/device")}
     except OSError:
@@ -65,6 +97,8 @@ def _physical_nics() -> set[str]:
 
 
 def _read_temp() -> float | None:
+    if not hasattr(psutil, "sensors_temperatures"):   # Windows, macOS
+        return None
     try:
         temps = psutil.sensors_temperatures()
     except Exception:
@@ -90,6 +124,18 @@ class Collector:
         self._prev_net = self._net_counters()
         self._prev_proc_io: dict[int, tuple[int, float]] = {}
         self._proc_primed = False
+        self._nics_checked = time.monotonic()
+        try:
+            psutil.getloadavg()   # в Windows запускает фоновый подсчёт
+        except Exception:
+            pass
+
+    @staticmethod
+    def _load() -> tuple[float, float, float]:
+        try:
+            return psutil.getloadavg()
+        except Exception:
+            return (0.0, 0.0, 0.0)
 
     def _disk_counters(self) -> dict[str, tuple[int, int]]:
         try:
@@ -134,6 +180,11 @@ class Collector:
         except Exception:
             freq_mhz = None
 
+        if WINDOWS and now - self._nics_checked > 30:
+            # в Windows адаптеры включаются/выключаются (Wi-Fi, VPN) — пересматриваем
+            self._nics_checked = now
+            self.nics = _physical_nics()
+
         disk = self._disk_counters()
         dr, dw, dname = self._rates(self._prev_disk, disk, dt)
         self._prev_disk = disk
@@ -143,7 +194,7 @@ class Collector:
 
         snap = Snapshot(
             ts=time.time(), cpu=cpu, per_cpu=per_cpu, temp=_read_temp(),
-            load=os.getloadavg(), freq_mhz=freq_mhz,
+            load=self._load(), freq_mhz=freq_mhz,
             mem_used=vm.total - vm.available, mem_total=vm.total,
             mem_percent=vm.percent,
             mem_cached=getattr(vm, "cached", 0) + getattr(vm, "buffers", 0),
@@ -165,13 +216,33 @@ class Collector:
         io_now: dict[int, tuple[int, float]] = {}
         attrs = ["pid", "ppid", "name", "username", "num_threads",
                  "memory_info", "cpu_percent", "io_counters", "status"]
+        table = None
+        if WINDOWS:
+            attrs.append("exe")
+            try:
+                table = win_proc_table()
+            except Exception:
+                table = None
+            if table is not None:
+                # ppid/num_threads/status в psutil под Windows очень дорогие
+                attrs = [a for a in attrs if a not in ("ppid", "num_threads", "status")]
         for p in psutil.process_iter(attrs, ad_value=None):
             i = p.info
             pid = i["pid"]
+            if table is not None:
+                nth, susp = table.get(pid, (0, False))
+                i["num_threads"] = nth
+                i["status"] = psutil.STATUS_STOPPED if susp else psutil.STATUS_RUNNING
             nth = i["num_threads"] or 0
             threads += nth
-            # потоки ядра (kthreadd и его дети) не показываем
-            if pid == 2 or i["ppid"] == 2:
+            if WINDOWS:
+                if pid in _WIN_HIDDEN_PIDS:
+                    continue
+                exe = i.get("exe")
+                if exe and i["name"] and i["name"] not in EXE_BY_NAME:
+                    EXE_BY_NAME[i["name"]] = exe
+            # потоки ядра Linux (kthreadd и его дети) не показываем
+            elif pid == 2 or i["ppid"] == 2:
                 continue
             mi = i["memory_info"]
             io = i["io_counters"]
@@ -185,7 +256,7 @@ class Collector:
             procs.append(ProcInfo(
                 pid=pid,
                 name=i["name"] or "?",
-                user=i["username"] or "?",
+                user=short_user(i["username"]),
                 cpu=(i["cpu_percent"] or 0.0) / NCPU if self._proc_primed else 0.0,
                 mem=mi.rss if mi else 0,
                 threads=nth,

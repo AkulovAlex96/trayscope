@@ -1,4 +1,7 @@
-"""Настройки (QSettings) и автозапуск через ~/.config/autostart."""
+"""Настройки (QSettings) и автозапуск.
+
+Linux — ~/.config/autostart/*.desktop, Windows — ключ реестра HKCU\\…\\Run.
+"""
 from __future__ import annotations
 
 import os
@@ -7,11 +10,30 @@ import sys
 
 from PyQt6.QtCore import QSettings
 
+from .osdep import WINDOWS
+
 AUTOSTART = os.path.expanduser("~/.config/autostart/tray-monitor.desktop")
 ENTRY = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tray_monitor.py"))
 
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_NAME = "Trayscope"
+
 ICON_STYLES = {"bars": "Столбики ЦП / ОЗУ", "graph": "Мини-график ЦП", "number": "Число ЦП %"}
 INTERVALS = {500: "0,5 с", 1000: "1 с", 2000: "2 с", 5000: "5 с"}
+
+
+def _gui_python() -> str:
+    """pythonw.exe — чтобы при автозапуске в Windows не висело окно консоли."""
+    exe = sys.executable
+    if WINDOWS:
+        w = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        if os.path.exists(w):
+            return w
+    return exe
+
+
+def _win_command() -> str:
+    return f'"{_gui_python()}" "{ENTRY}"'
 
 
 class Settings:
@@ -41,10 +63,30 @@ class Settings:
 
     @property
     def autostart(self) -> bool:
+        if WINDOWS:
+            import winreg
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+                    winreg.QueryValueEx(k, RUN_NAME)
+                return True
+            except OSError:
+                return False
         return os.path.exists(AUTOSTART)
 
     @autostart.setter
     def autostart(self, on: bool) -> None:
+        if WINDOWS:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
+                                winreg.KEY_SET_VALUE) as k:
+                if on:
+                    winreg.SetValueEx(k, RUN_NAME, 0, winreg.REG_SZ, _win_command())
+                else:
+                    try:
+                        winreg.DeleteValue(k, RUN_NAME)
+                    except FileNotFoundError:
+                        pass
+            return
         if on:
             os.makedirs(os.path.dirname(AUTOSTART), exist_ok=True)
             with open(AUTOSTART, "w", encoding="utf-8") as f:

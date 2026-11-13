@@ -1,6 +1,7 @@
 """Общие виджеты: график-спарклайн, полоски ядер, плитка метрики."""
 from __future__ import annotations
 
+import sys
 from collections import deque
 
 from PyQt6.QtCore import QPointF, QRectF, QSize, Qt
@@ -207,12 +208,16 @@ def fill_tiles(tiles: dict[str, MetricTile], hist: History, s) -> None:
     t.set_value(f"{s.cpu:.0f}", "%")
     t.extra.setText(f"{s.temp:.0f} °C" if s.temp is not None else "")
     t.chart.set_series([(hist.cpu, T.CPU, False, True)], 100)
-    la = " ".join(T.fmt_num(x, 2) for x in s.load)
+    if sys.platform == "win32":
+        # load average в Windows лишь эмулируется и почти всегда около нуля
+        la_text = f"{s.proc_count} процессов"
+    else:
+        la_text = "load " + " ".join(T.fmt_num(x, 2) for x in s.load)
     if big:
         fr = f"{T.fmt_num(s.freq_mhz / 1000)} ГГц · " if s.freq_mhz else ""
-        t.set_sub(f"{fr}load {la}")
+        t.set_sub(f"{fr}{la_text}")
     else:
-        t.set_sub(f"load {la}")
+        t.set_sub(la_text)
 
     t = tiles["ram"]
     t.set_value(f"{s.mem_percent:.0f}", "%")

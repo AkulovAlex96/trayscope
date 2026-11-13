@@ -9,7 +9,11 @@ import time
 from dataclasses import dataclass
 
 from PyQt6.QtCore import QRect
-from PyQt6.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage
+
+try:  # в Windows-сборках PyQt6 модуля QtDBus может не быть
+    from PyQt6.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage
+except ImportError:
+    QDBusConnection = None
 
 FLOAT_GAP = 8  # отступ плавающей панели Plasma 6 от края экрана
 
@@ -34,6 +38,8 @@ _cache: tuple[float, PanelInfo | None] = (0.0, None)
 
 
 def _query() -> PanelInfo | None:
+    if QDBusConnection is None:
+        return None
     iface = QDBusInterface("org.kde.plasmashell", "/PlasmaShell", "org.kde.PlasmaShell",
                            QDBusConnection.sessionBus())
     if not iface.isValid():
